@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisionWatch PRO: Advanced Object Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f0f0f0; text-align: center; padding: 20px; transition: background-color 0.3s ease, color 0.3s ease; }
+        h1 { margin-bottom: 20px; color: #222; }
+        .video-container { position: relative; display: inline-block; border: 2px solid #222; border-radius: 10px; overflow: hidden; background-color: #000; }
+        #webcam { width: 640px; height: 480px; object-fit: cover; border-radius: 10px; }
+        #overlay { position: absolute; top: 0; left: 0; width: 640px; height: 480px; pointer-events: none; }
+        #status { margin-top: 15px; font-size: 1.1em; color: #444; }
+        button { margin: 10px 5px; padding: 10px 20px; font-size: 1em; border: none; border-radius: 6px; background-color: #0069d9; color: white; cursor: pointer; transition: background-color 0.3s ease; }
+        button.active { background-color: #218838; }
+        button:hover { background-color: #0056b3; }
+        #object-list, #feedback-section { margin-top: 25px; text-align: left; display: inline-block; width: 640px; background-color: #ffffff; padding: 15px; border: 1px solid #ccc; border-radius: 10px; }
+        #object-list ul { list-style-type: none; padding-left: 20px; max-height: 180px; overflow-y: auto; }
+        #object-list li { padding: 5px 0; border-bottom: 1px solid #eee; }
+        #user-name-input, #feedback-input { width: 300px; padding: 8px; margin-top: 10px; border-radius: 5px; border: 1px solid #aaa; }
+        .dark-mode { background-color: #111; color: #eee; }
+        .dark-mode #object-list, .dark-mode #feedback-section { background-color: #1e1e1e; border-color: #444; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+</head>
+<body>
+    <h1>VisionWatch PRO: Advanced Object Tracker</h1>
+    <div class="video-container">
+        <video id="webcam" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+    </div>
+    <p id="status">Loading model...</p>
+    <input type="text" id="user-name-input" placeholder="Enter your name">
+    <button id="name-submit">Submit Name</button>
+    <button id="toggle-speech">Enable Audio</button>
+    <button id="toggle-dark-mode">Toggle Dark Mode</button>
+
+    <div id="object-list">
+        <h2>Detected Objects</h2>
+        <ul id="detected-list"></ul>
+    </div>
+
+    <div id="feedback-section">
+        <h2>Feedback</h2>
+        <input type="text" id="feedback-input" placeholder="Type feedback (correct/wrong)">
+        <button id="submit-feedback">Submit</button>
+    </div>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('overlay');
+        const ctx = canvas.getContext('2d');
+        const statusElement = document.getElementById('status');
+        const toggleSpeechButton = document.getElementById('toggle-speech');
+        const toggleDarkModeButton = document.getElementById('toggle-dark-mode');
+        const userNameInput = document.getElementById('user-name-input');
+        const nameSubmitButton = document.getElementById('name-submit');
+        const feedbackInput = document.getElementById('feedback-input');
+        const submitFeedbackButton = document.getElementById('submit-feedback');
+        const detectedList = document.getElementById('detected-list');
+
+        let model;
+        let speechEnabled = false;
+        let spokenObjects = new Set();
+        let humanGreetingAnnounced = false;
+        let userName = "";
+        let trails = {};
+
+        const labelMappings = { 'person': 'Person' };
+
+        async function setupWebcam() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            return new Promise((resolve) => video.onloadedmetadata = () => resolve(video.play()));
+        }
+
+        async function loadModel() {
+            model = await cocoSsd.load();
+            statusElement.textContent = 'Model ready. Detecting...';
+        }
+
+        function drawTrail(label, x, y) {
+            if (!trails[label]) trails[label] = [];
+            trails[label].push([x, y]);
+            if (trails[label].length > 30) trails[label].shift();
+            ctx.strokeStyle = 'rgba(255, 0, 255, 0.6)';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < trails[label].length - 1; i++) {
+                const [x1, y1] = trails[label][i];
+                const [x2, y2] = trails[label][i + 1];
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+        }
+
+        async function detectFrame() {
+            if (model && video.readyState === 4) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                const predictions = await model.detect(video);
+                let humanDetected = false;
+                detectedList.innerHTML = '';
+
+                predictions.forEach(pred => {
+                    const [x, y, width, height] = pred.bbox;
+                    const label = labelMappings[pred.class] || pred.class;
+                    const text = `${label} (${(pred.score * 100).toFixed(1)}%)`;
+
+                    const centerX = x + width / 2;
+                    const centerY = y + height / 2;
+                    drawTrail(label, centerX, centerY);
+
+                    ctx.strokeStyle = '#00FFFF';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, width, height);
+                    ctx.fillStyle = '#00FFFF';
+                    ctx.font = '16px Segoe UI';
+                    const textWidth = ctx.measureText(text).width;
+                    ctx.fillRect(x, y - 20, textWidth + 8, 24);
+                    ctx.fillStyle = '#000';
+                    ctx.fillText(text, x + 4, y - 4);
+
+                    if (!spokenObjects.has(label) && speechEnabled) {
+                        speak(label);
+                        spokenObjects.add(label);
+                    }
+
+                    const li = document.createElement('li');
+                    li.textContent = text;
+                    detectedList.appendChild(li);
+
+                    if (label === 'Person') humanDetected = true;
+                });
+
+                if (humanDetected && !humanGreetingAnnounced && speechEnabled) {
+                    speak(userName ? `Hello, ${userName}` : "Hello, human");
+                    humanGreetingAnnounced = true;
+                }
+
+                if (!humanDetected) humanGreetingAnnounced = false;
+                if (!predictions.length) spokenObjects.clear();
+            }
+            requestAnimationFrame(detectFrame);
+        }
+
+        function speak(text) {
+            if ('speechSynthesis' in window) {
+                const utter = new SpeechSynthesisUtterance(text);
+                window.speechSynthesis.speak(utter);
+            }
+        }
+
+        toggleSpeechButton.onclick = () => {
+            speechEnabled = !speechEnabled;
+            toggleSpeechButton.classList.toggle('active');
+            toggleSpeechButton.textContent = speechEnabled ? 'Disable Audio' : 'Enable Audio';
+        };
+
+        toggleDarkModeButton.onclick = () => {
+            document.body.classList.toggle('dark-mode');
+            toggleDarkModeButton.classList.toggle('active');
+        };
+
+        nameSubmitButton.onclick = () => {
+            userName = userNameInput.value || 'there';
+            alert(`Name set to ${userName}`);
+        };
+
+        submitFeedbackButton.onclick = () => {
+            const fb = feedbackInput.value.toLowerCase();
+            if (fb === 'correct' || fb === 'wrong') console.log(`Feedback: ${fb}`);
+            feedbackInput.value = '';
+        };
+
+        setupWebcam().then(loadModel).then(detectFrame);
+    </script>
+</body>
+</html>
